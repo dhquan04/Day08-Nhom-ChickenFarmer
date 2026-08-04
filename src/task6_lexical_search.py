@@ -1,45 +1,172 @@
 """
 Task 6 — Lexical Search Module (BM25).
 
-Mặc định sử dụng BM25. Nếu dùng phương pháp khác (TF-IDF, Elasticsearch,
-Weaviate BM25 built-in), hãy giải thích cơ chế trong buổi demo → +5 bonus.
-
-Cài đặt:
-    pip install rank-bm25
-
+Mặc định sử dụng BM25 (rank-bm25).
 BM25 hoạt động thế nào:
-    - Term Frequency (TF): từ xuất hiện nhiều trong document → điểm cao
-    - Inverse Document Frequency (IDF): từ hiếm → quan trọng hơn
+    - Term Frequency (TF): từ xuất hiện nhiều trong document -> điểm cao
+    - Inverse Document Frequency (IDF): từ hiếm -> quan trọng hơn
     - Document length normalization: document dài không bị ưu tiên quá mức
-    - Formula: score(q,d) = Σ IDF(qi) * (tf(qi,d) * (k1+1)) / (tf(qi,d) + k1*(1-b+b*|d|/avgdl))
-    - k1=1.5 (term saturation), b=0.75 (length normalization)
 """
 
+import os
+import sys
 from pathlib import Path
+from typing import List, Dict, Any
+import numpy as np
+from rank_bm25 import BM25Okapi
 
-# TODO: Load corpus từ data/standardized/ hoặc từ vector store
-CORPUS: list[dict] = []  # List of {'content': str, 'metadata': dict}
+# Tắt cảnh báo dọn dẹp bộ nhớ của multiprocess trên Python 3.12 khi thoát chương trình
+try:
+    import multiprocess.resource_tracker
+    multiprocess.resource_tracker.ResourceTracker._stop = lambda *args, **kwargs: None
+except Exception:
+    pass
+
+# Đảm bảo stdout in utf-8 trên Windows console
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# Thêm project root vào sys.path
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+STANDARDIZED_DIR = PROJECT_ROOT / "data" / "standardized"
+
+# Default fallback corpus if no markdown files are found in data/standardized/ yet
+DEFAULT_CORPUS: List[Dict[str, Any]] = [
+    {
+        "content": "Chính sách trả hàng và hoàn tiền Shopee Vietnam trong vòng 15 ngày. Khách hàng cần cung cấp bằng chứng hình ảnh và video quay lại sản phẩm khi mở hộp để yêu cầu refund policy.",
+        "metadata": {"source": "returns-refund-policy-shopee.md", "category": "legal"}
+    },
+    {
+        "content": "Các phương thức thanh toán hỗ trợ trên Shopee bao gồm: Thẻ tín dụng, Thẻ ghi nợ, Ví ShopeePay, Thanh toán khi nhận hàng (COD) và Chuyển khoản ngân hàng (payment methods).",
+        "metadata": {"source": "payment-methods-shopee.md", "category": "legal"}
+    },
+    {
+        "content": "Quy định đăng bán sản phẩm dành cho người bán (seller listing regulations). Các mặt hàng bị cấm đăng bán bao gồm hàng giả, hàng nhái, chất cấm và vũ khí.",
+        "metadata": {"source": "product-listing-regulations-shopee.md", "category": "legal"}
+    },
+    {
+        "content": "Hướng dẫn theo dõi đơn hàng và quy trình tra cứu hành trình vận chuyển cho người mua (order tracking guide).",
+        "metadata": {"source": "order-tracking-guide.md", "category": "news"}
+    },
+    {
+        "content": "Quy định bảo mật thông tin cá nhân và bảo vệ dữ liệu người dùng trên nền tảng thương mại điện tử (privacy policy).",
+        "metadata": {"source": "privacy-policy-shopee.md", "category": "legal"}
+    }
+]
 
 
-def build_bm25_index(corpus: list[dict]):
+def load_corpus() -> List[Dict[str, Any]]:
+    """
+    Load corpus từ các file markdown trong data/standardized/.
+    Ưu tiên dùng chunking đồng bộ với Task 4 (RecursiveCharacterTextSplitter).
+    Nếu chưa có, dùng fallback parser hoặc DEFAULT_CORPUS.
+    """
+    corpus = []
+    
+    # 1. Thử dùng hàm chunking chuẩn từ Task 4 nếu có
+    try:
+        from src.task4_chunking_indexing import load_documents, chunk_documents
+        docs = load_documents()
+        if docs:
+            chunks = chunk_documents(docs)
+            for c in chunks:
+                meta = c.get("metadata", {}).copy()
+                content = c.get("content", "")
+                
+                # Trích xuất thêm title/url từ content nếu có
+                if "title" not in meta:
+                    meta["title"] = meta.get("source", "").replace(".md", "").replace("-", " ").title()
+                
+                corpus.append({
+                    "content": content,
+                    "metadata": meta
+                })
+            if corpus:
+                return corpus
+    except Exception as e:
+        print(f"  [Note] Task 4 chunker loader fallback: {e}")
+
+    # 2. Fallback đọc trực tiếp file markdown nếu Task 4 chưa sẵn sàng
+    if STANDARDIZED_DIR.exists():
+        md_files = list(STANDARDIZED_DIR.rglob("*.md"))
+        for md_file in md_files:
+            try:
+                text = md_file.read_text(encoding="utf-8").strip()
+                if not text:
+                    continue
+                
+                doc_type = "legal" if "legal" in str(md_file.parent) else "news"
+                
+                # Parse title và url từ header
+                title = md_file.stem.replace("-", " ").title()
+                url = ""
+                for line in text.split("\n")[:10]:
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                    elif line.startswith("**Source:**"):
+                        url = line.replace("**Source:**", "").strip()
+
+                # Tách đoạn văn bản (paragraphs)
+                paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 30]
+                if not paragraphs:
+                    paragraphs = [text]
+                
+                for idx, p in enumerate(paragraphs):
+                    corpus.append({
+                        "content": p,
+                        "metadata": {
+                            "source": md_file.name,
+                            "path": str(md_file.relative_to(STANDARDIZED_DIR)),
+                            "type": doc_type,
+                            "title": title,
+                            "url": url,
+                            "chunk_index": idx
+                        }
+                    })
+            except Exception as e:
+                print(f"Lỗi đọc file {md_file}: {e}")
+
+    if not corpus:
+        corpus = DEFAULT_CORPUS
+    return corpus
+
+
+CORPUS: List[Dict[str, Any]] = load_corpus()
+_BM25_INDEX = None
+
+
+import re
+
+def tokenize(text: str) -> List[str]:
+    """Tách từ đơn giản và loại bỏ dấu câu."""
+    return re.findall(r'\w+', text.lower())
+
+
+def get_searchable_text(doc: Dict[str, Any]) -> str:
+    """Ghép metadata nguồn, tiêu đề và nội dung để BM25 index trọn vẹn."""
+    meta = doc.get("metadata", {})
+    source = meta.get("source", "")
+    title = meta.get("title", "")
+    content = doc.get("content", "")
+    return f"{title} {source} {content}"
+
+
+def build_bm25_index(corpus: List[Dict[str, Any]]) -> BM25Okapi:
     """
     Xây dựng BM25 index từ corpus.
 
     Args:
         corpus: List of {'content': str, 'metadata': dict}
     """
-    # TODO: Implement BM25 index
-    #
-    # from rank_bm25 import BM25Okapi
-    #
-    # # Tokenize - có thể đơn giản split(), hoặc dùng underthesea cho tiếng Việt
-    # tokenized_corpus = [doc["content"].lower().split() for doc in corpus]
-    # bm25 = BM25Okapi(tokenized_corpus)
-    # return bm25
-    raise NotImplementedError("Implement build_bm25_index")
+    tokenized_corpus = [tokenize(get_searchable_text(doc)) for doc in corpus]
+    bm25 = BM25Okapi(tokenized_corpus)
+    return bm25
 
 
-def lexical_search(query: str, top_k: int = 10) -> list[dict]:
+def lexical_search(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
     """
     Tìm kiếm từ khóa sử dụng BM25.
 
@@ -55,29 +182,47 @@ def lexical_search(query: str, top_k: int = 10) -> list[dict]:
         }
         Sorted by score descending.
     """
-    # TODO: Implement lexical search
-    #
-    # tokenized_query = query.lower().split()
-    # scores = bm25.get_scores(tokenized_query)
-    #
-    # # Get top_k indices
-    # import numpy as np
-    # top_indices = np.argsort(scores)[::-1][:top_k]
-    #
-    # results = []
-    # for idx in top_indices:
-    #     if scores[idx] > 0:
-    #         results.append({
-    #             "content": CORPUS[idx]["content"],
-    #             "score": float(scores[idx]),
-    #             "metadata": CORPUS[idx]["metadata"]
-    #         })
-    # return results
-    raise NotImplementedError("Implement lexical_search")
+    global CORPUS, _BM25_INDEX
+
+    if not CORPUS:
+        CORPUS = load_corpus()
+
+    if _BM25_INDEX is None:
+        _BM25_INDEX = build_bm25_index(CORPUS)
+
+    tokenized_query = tokenize(query)
+    if not tokenized_query:
+        return []
+
+    scores = _BM25_INDEX.get_scores(tokenized_query)
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results = []
+    for idx in top_indices:
+        results.append({
+            "content": CORPUS[idx]["content"],
+            "score": float(scores[idx]),
+            "metadata": CORPUS[idx].get("metadata", {})
+        })
+    
+    # Sort results descending by score
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_k]
 
 
 if __name__ == "__main__":
-    # Test
-    results = lexical_search("phương thức thanh toán shopee", top_k=5)
-    for r in results:
-        print(f"[{r['score']:.3f}] {r['content'][:100]}...")
+    query = "phương thức thanh toán shopee"
+    results = lexical_search(query, top_k=5)
+    print(f"=== KẾT QUẢ TÌM KIẾM BM25 CHO QUERY: '{query}' ({len(results)} chunks) ===\n")
+    for i, r in enumerate(results, 1):
+        meta = r.get("metadata", {})
+        source = meta.get("source", "Unknown")
+        score = r.get("score", 0.0)
+        content = r.get("content", "")
+        print(f"[{i}] Score: {score:.4f} | Nguồn: {source}")
+        if meta.get("title"):
+            print(f"    Tiêu đề: {meta['title']}")
+        if meta.get("url"):
+            print(f"    URL: {meta['url']}")
+        print(f"    Nội dung:\n{content}\n" + "-" * 70)
+
