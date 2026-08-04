@@ -68,7 +68,14 @@ def load_corpus() -> List[Dict[str, Any]]:
     
     # 1. Thử dùng hàm chunking chuẩn từ Task 4 nếu có
     try:
-        from src.task4_chunking_indexing import load_documents, chunk_documents
+        try:
+            from .task4_chunking_indexing import load_documents, chunk_documents
+        except ImportError:
+            try:
+                from task4_chunking_indexing import load_documents, chunk_documents
+            except ImportError:
+                from src.task4_chunking_indexing import load_documents, chunk_documents
+        
         docs = load_documents()
         if docs:
             chunks = chunk_documents(docs)
@@ -76,7 +83,7 @@ def load_corpus() -> List[Dict[str, Any]]:
                 meta = c.get("metadata", {}).copy()
                 content = c.get("content", "")
                 
-                # Trích xuất thêm title/url từ content nếu có
+                # Trích xuất thêm title nếu chưa có
                 if "title" not in meta:
                     meta["title"] = meta.get("source", "").replace(".md", "").replace("-", " ").title()
                 
