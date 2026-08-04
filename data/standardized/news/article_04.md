@@ -1,0 +1,23 @@
+# Hướng Dẫn Mua Hàng Xuyên Biên Giới Trên Shopee International
+
+**Source:** https://help.shopee.vn/portal/4/article/79220
+**Crawled:** 2026-08-04T14:26:13.006108
+
+---
+
+# Hướng Dẫn Mua Hàng Xuyên Biên Giới Trên Shopee International
+
+## 1. Đơn hàng Xuyên biên giới là gì?
+Đơn hàng Xuyên biên giới (Cross-border order) là các đơn hàng được bán bởi các Người bán nước ngoài (chủ yếu từ Trung Quốc, Hàn Quốc, Nhật Bản, Đài Loan) gửi trực tiếp về Việt Nam thông qua hệ thống vận chuyển quốc tế của Shopee.
+
+## 2. Cách nhận biết và đặt mua sản phẩm quốc tế
+- **Nhận biết:** Trên hình ảnh sản phẩm có nhãn **Hàng Quốc Tế** hoặc thông tin Người bán hiển thị địa chỉ ở nước ngoài.
+- **Đặt hàng:** Quy trình đặt hàng tương tự đơn hàng trong nước. Bạn chọn sản phẩm, áp mã giảm giá và chọn phương thức thanh toán phù hợp.
+
+## 3. Thời gian giao hàng và thuế/phí nhập khẩu
+- **Thời gian giao hàng:** Trung bình từ 7 đến 12 ngày làm việc (có thể kéo dài hơn do sự cố thời tiết hoặc thủ tục thông quan tại cửa khẩu).
+- **Thuế & Phí nhập khẩu:** Giá hiển thị trên Shopee đã bao gồm thuế nhập khẩu và thuế VAT (nếu có). Người mua không phải trả thêm bất kỳ khoản phí thuế phát sinh nào khi nhận hàng.
+
+## 4. Chính sách Trả hàng / Hoàn tiền đối với đơn hàng Quốc tế
+- Đơn hàng quốc tế vẫn áp dụng đầy đủ Chính sách Trả hàng và Hoàn tiền 15 ngày của Shopee.
+- Trường hợp hàng lỗi/hỏng, trong nhiều trường hợp Shopee sẽ hỗ trợ hoàn tiền ngay cho Người mua mà không bắt buộc phải gửi trả sản phẩm về nước ngoài để tiết kiệm chi phí vận chuyển.
