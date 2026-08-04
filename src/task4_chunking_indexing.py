@@ -33,6 +33,11 @@ EMBEDDING_DIM = 1024
 VECTOR_STORE = "chromadb"
 COLLECTION_NAME = "ecommerce_support_docs"
 
+import os
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # Mapping customer_role cho từng tài liệu (buyer / seller / both)
 CUSTOMER_ROLE_MAP = {
     "returns-refund-policy-shopee.md": "buyer",
@@ -53,7 +58,10 @@ def get_embedding_model() -> SentenceTransformer:
     """Trả về singleton instance của SentenceTransformer model."""
     global _MODEL_INSTANCE
     if _MODEL_INSTANCE is None:
-        _MODEL_INSTANCE = SentenceTransformer(EMBEDDING_MODEL)
+        try:
+            _MODEL_INSTANCE = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
+        except Exception:
+            _MODEL_INSTANCE = SentenceTransformer(EMBEDDING_MODEL)
     return _MODEL_INSTANCE
 
 
