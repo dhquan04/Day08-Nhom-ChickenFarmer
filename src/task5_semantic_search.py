@@ -77,15 +77,17 @@ def semantic_search(query: str, top_k: int = 10, use_hyde: bool = False) -> list
         }
         Sorted by score descending.
     """
-    model = get_embedding_model()
-    collection = get_collection()
+    try:
+        collection = get_collection()
+        count = collection.count()
+        if count == 0:
+            return []
 
-    # Nếu dùng HyDE, embed câu trả lời giả định thay vì raw query
-    search_text = generate_hypothetical_document(query) if use_hyde else query
-    query_vector = model.encode(search_text).tolist()
-
-    count = collection.count()
-    if count == 0:
+        model = get_embedding_model()
+        search_text = generate_hypothetical_document(query) if use_hyde else query
+        query_vector = model.encode(search_text).tolist()
+    except Exception as e:
+        print(f"  [Note] Semantic Search model loading fallback: {e}")
         return []
 
     # Query ChromaDB (Cosine distance = 1 - cosine similarity)

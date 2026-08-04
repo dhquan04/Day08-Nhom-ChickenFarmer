@@ -6,12 +6,17 @@ structural understanding của document thay vì embedding.
 """
 
 import os
+import sys
 import json
 from pathlib import Path
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Đảm bảo stdout in utf-8 trên Windows console
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 PAGEINDEX_API_KEY = os.getenv("PAGEINDEX_API_KEY", "")
 STANDARDIZED_DIR = Path(__file__).parent.parent / "data" / "standardized"
@@ -39,14 +44,27 @@ PAGEINDEX_FALLBACK_DOCS = [
 ]
 
 
+CACHE_FILE = Path(__file__).parent.parent / "data" / "pageindex_cache.json"
+
+
 def upload_documents() -> List[str]:
     """
     Upload toàn bộ markdown documents lên PageIndex.
+    Có lưu cache doc_ids để tránh re-upload nhiều lần.
     Returns list of document IDs uploaded.
     """
-    if not PAGEINDEX_API_KEY:
-        print("⚠ Không tìm thấy PAGEINDEX_API_KEY trong file .env. Bỏ qua bước upload.")
+    if not PAGEINDEX_API_KEY or PAGEINDEX_API_KEY.startswith("your_"):
+        print("⚠ Chưa cấu hình PAGEINDEX_API_KEY hợp lệ trong file .env. Bỏ qua bước upload.")
         return []
+
+    # Đọc cache nếu có
+    if CACHE_FILE.exists():
+        try:
+            cached_data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            if isinstance(cached_data, list) and len(cached_data) > 0:
+                return cached_data
+        except Exception:
+            pass
 
     uploaded_ids = []
     try:
@@ -62,7 +80,18 @@ def upload_documents() -> List[str]:
                     uploaded_ids.append(doc_id)
                     print(f"  ✓ Uploaded: {md_file.name} -> {doc_id}")
             except Exception as err:
-                print(f"Lỗi upload {md_file.name}: {err}")
+                err_msg = str(err)
+                if "Invalid API key" in err_msg or "unauthorized" in err_msg.lower():
+                    print("⚠ PAGEINDEX_API_KEY trong .env không hợp lệ. Tự động chuyển sang Local Vectorless Search.")
+                    break
+                print(f"  [Note] Upload {md_file.name} fallback: {err}")
+
+        if uploaded_ids:
+            try:
+                CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                CACHE_FILE.write_text(json.dumps(uploaded_ids, indent=2), encoding="utf-8")
+            except Exception:
+                pass
     except Exception as e:
         print(f"Lỗi kết nối PageIndex SDK: {e}")
 
@@ -71,7 +100,7 @@ def upload_documents() -> List[str]:
 
 def pageindex_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
     """
-    Vectorless retrieval sử dụng PageIndex.
+    Vectorless retrieval sử dụng PageIndex Cloud API (hoặc Local Section Tree Search).
     Dùng làm fallback khi hybrid search không có kết quả tốt.
 
     Args:
@@ -83,48 +112,103 @@ def pageindex_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
             'content': str,
             'score': float,
             'metadata': dict,
-            'source': 'pageindex'   # Đánh dấu nguồn retrieval
+            'source': 'pageindex'
         }
     """
-    if PAGEINDEX_API_KEY:
+    if PAGEINDEX_API_KEY and not PAGEINDEX_API_KEY.startswith("your_"):
         try:
             from pageindex.client import PageIndexClient
             client = PageIndexClient(api_key=PAGEINDEX_API_KEY)
-            resp = client.submit_query(query=query)
-            retrieval_id = resp.get("retrieval_id") or resp.get("id")
-
-            if retrieval_id:
-                retrieval = client.get_retrieval(retrieval_id)
+            doc_ids = upload_documents()
+            
+            if doc_ids:
                 results = []
                 rank = 1
-                for node in retrieval.get("retrieved_nodes", []):
-                    for group in node.get("relevant_contents", []):
-                        for item in group:
-                            content = item.get("relevant_content", "")
-                            if content:
-                                results.append({
-                                    "content": content,
-                                    "score": round(1.0 / (rank + 1), 4),
-                                    "metadata": {"section": item.get("section_title", "General")},
-                                    "source": "pageindex"
-                                })
-                                rank += 1
+                print(f"[PageIndex API] Đang truy vấn cây cấu trúc trên {len(doc_ids)} tài liệu Cloud...")
+                
+                # Duyệt qua các tài liệu đã upload trên PageIndex Cloud
+                for i, doc_id in enumerate(doc_ids, 1):
+                    try:
+                        resp = client.submit_query(doc_id=doc_id, query=query)
+                        retrieval_id = resp.get("retrieval_id") or resp.get("id")
+
+                        if retrieval_id:
+                            retrieval = client.get_retrieval(retrieval_id)
+                            retrieved_nodes = retrieval.get("retrieved_nodes") or []
+                            for node in retrieved_nodes:
+                                node_title = node.get("title", "")
+                                for group in node.get("relevant_contents", []):
+                                    for item in group:
+                                        content = item.get("relevant_content", "")
+                                        if content:
+                                            results.append({
+                                                "content": content,
+                                                "score": round(1.0 / (rank + 1), 4),
+                                                "metadata": {
+                                                    "section": item.get("section_title") or node_title or "General",
+                                                    "doc_id": doc_id
+                                                },
+                                                "source": "pageindex"
+                                            })
+                                            rank += 1
+                        
+                        # Ngắt sớm nếu đã tìm đủ số lượng kết quả liên quan
+                        if len(results) >= top_k:
+                            break
+                    except Exception:
+                        pass
+
                 if results:
+                    results.sort(key=lambda x: x["score"], reverse=True)
                     return results[:top_k]
         except Exception as e:
-            print(f"Lỗi truy vấn PageIndex API ({e}), chuyển sang fallback vectorless search.")
+            print(f"  [Note] PageIndex Cloud API search fallback: {e}")
 
-    # Local fallback vectorless search
+    # Local fallback vectorless search (truy vấn trực tiếp tài liệu dựa trên cấu trúc section/heading)
+    print("[PageIndex Local] Đang phân tích cây cấu trúc tiêu đề tài liệu...")
     results = []
     query_words = set(query.lower().split())
     
-    for doc in PAGEINDEX_FALLBACK_DOCS:
-        doc_words = set(doc["content"].lower().split())
-        overlap = len(query_words.intersection(doc_words)) if query_words else 0
-        doc_copy = doc.copy()
-        doc_copy["score"] = float(doc["score"] + 0.1 * overlap)
-        doc_copy["source"] = "pageindex"
-        results.append(doc_copy)
+    if STANDARDIZED_DIR.exists():
+        for md_file in STANDARDIZED_DIR.rglob("*.md"):
+            try:
+                text = md_file.read_text(encoding="utf-8").strip()
+                if not text:
+                    continue
+                
+                # Phân tích cây cấu trúc tiêu đề (Headings) của file Markdown
+                current_heading = md_file.stem.replace("-", " ").title()
+                sections = text.split("\n\n")
+                
+                for sec in sections:
+                    sec_clean = sec.strip()
+                    if not sec_clean:
+                        continue
+                    if sec_clean.startswith("#"):
+                        current_heading = sec_clean.lstrip("#").strip()
+                        continue
+                    
+                    sec_words = set(sec_clean.lower().split())
+                    overlap = len(query_words.intersection(sec_words)) if query_words else 0
+                    
+                    if overlap > 0:
+                        score = round(0.5 + 0.1 * overlap, 4)
+                        results.append({
+                            "content": sec_clean,
+                            "score": score,
+                            "metadata": {
+                                "section": current_heading,
+                                "file": md_file.name
+                            },
+                            "source": "pageindex"
+                        })
+            except Exception:
+                pass
+
+    if not results:
+        # Fallback cuối cùng nếu không tìm thấy từ trùng khớp
+        for doc in PAGEINDEX_FALLBACK_DOCS:
+            results.append(doc.copy())
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:top_k]

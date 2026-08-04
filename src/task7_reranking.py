@@ -7,8 +7,113 @@ Phương pháp:
     - Cross-encoder reranker: đánh giá cặp (query, document).
 """
 
+import os
+import sys
 import math
+from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+# Tắt cảnh báo dọn dẹp bộ nhớ của multiprocess trên Python 3.12 khi thoát chương trình
+try:
+    import multiprocess.resource_tracker
+    multiprocess.resource_tracker.ResourceTracker._stop = lambda *args, **kwargs: None
+except Exception:
+    pass
+
+# Đảm bảo HF Hub không bị đứng do filelock hoặc cảnh báo symlink
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Đảm bảo stdout in utf-8 trên Windows console
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# Thêm project root vào sys.path
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def rerank_qwen(
+    query: str, candidates: List[Dict[str, Any]], top_k: int = 5
+) -> List[Dict[str, Any]]:
+    """
+    Rerank candidates sử dụng mô hình Qwen3 (Qwen3-Reranker hoặc Qwen LLM API).
+    
+    Args:
+        query: Câu truy vấn
+        candidates: List of {'content': str, 'score': float, 'metadata': dict}
+        top_k: Số lượng kết quả sau rerank
+
+    Returns:
+        List of top_k candidates được đánh giá bởi Qwen3.
+    """
+    if not candidates:
+        return []
+
+    # 1. Ưu tiên sử dụng Qwen API qua OpenRouter/OpenAI nếu có API key
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if api_key:
+        try:
+            from openai import OpenAI
+            base_url = "https://openrouter.ai/api/v1" if os.getenv("OPENROUTER_API_KEY") else None
+            client = OpenAI(api_key=api_key, base_url=base_url)
+
+            docs_text = "\n".join([f"[{i+1}] {c.get('content', '')[:200]}" for i, c in enumerate(candidates)])
+            prompt = (
+                f"Câu hỏi: {query}\n\n"
+                f"Danh sách các đoạn văn bản:\n{docs_text}\n\n"
+                f"Hãy đánh giá mức độ liên quan và sắp xếp lại các đoạn văn bản trên từ liên quan nhất đến ít liên quan nhất.\n"
+                f"Chỉ trả về thứ tự danh sách số thứ tự phân cách bằng dấu phẩy (ví dụ: 1, 3, 2)."
+            )
+            response = client.chat.completions.create(
+                model="qwen/qwen-2.5-72b-instruct",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=60,
+                temperature=0.0
+            )
+            raw = response.choices[0].message.content.strip()
+            import re
+            indices = [int(n) - 1 for n in re.findall(r'\d+', raw) if 0 <= int(n) - 1 < len(candidates)]
+            if indices:
+                results = []
+                seen = set()
+                rank = 1
+                for idx in indices:
+                    if idx not in seen:
+                        seen.add(idx)
+                        item = candidates[idx].copy()
+                        item["score"] = round(1.0 / (rank + 1), 4)
+                        results.append(item)
+                        rank += 1
+                for idx, c in enumerate(candidates):
+                    if idx not in seen:
+                        item = c.copy()
+                        item["score"] = round(1.0 / (rank + 1), 4)
+                        results.append(item)
+                        rank += 1
+                return results[:top_k]
+        except Exception as e:
+            print(f"  [Note] Qwen API rerank fallback: {e}")
+
+    # 2. Thử load local Qwen3 CrossEncoder nếu có
+    try:
+        from sentence_transformers import CrossEncoder
+        model = CrossEncoder("Qwen/Qwen3-Reranker-0.6B", max_length=512, local_files_only=True)
+        pairs = [[query, c.get("content", "")] for c in candidates]
+        scores = model.predict(pairs)
+        scored = []
+        for c, s in zip(candidates, scores):
+            item = c.copy()
+            item["score"] = float(s)
+            scored.append(item)
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:top_k]
+    except Exception:
+        pass
+
+    # 3. Fallback Cross-Encoder nhanh tránh treo tiến trình
+    return rerank_cross_encoder(query, candidates, top_k=top_k)
 
 
 def rerank_cross_encoder(
@@ -161,7 +266,7 @@ def rerank(
         query: Câu truy vấn
         candidates: Danh sách candidates từ retrieval (hoặc list of ranked lists nếu RRF)
         top_k: Số lượng kết quả sau rerank
-        method: "rrf" | "cross_encoder" | "mmr"
+        method: "rrf" | "cross_encoder" | "mmr" | "qwen"
 
     Returns:
         List of top_k reranked candidates.
@@ -169,12 +274,13 @@ def rerank(
     if not candidates:
         return []
 
-    if method == "rrf":
-        # Check if candidates is a list of lists or single list
+    if method == "qwen":
+        return rerank_qwen(query, candidates, top_k=top_k)
+
+    elif method == "rrf":
         if candidates and isinstance(candidates[0], list):
             ranked_lists = candidates
         else:
-            # Single list of candidates: create 2 variations (original score + keyword overlap score)
             celist = rerank_cross_encoder(query, candidates, top_k=len(candidates))
             ranked_lists = [candidates, celist]
         return rerank_rrf(ranked_lists, top_k=top_k)
@@ -191,12 +297,45 @@ def rerank(
 
 
 if __name__ == "__main__":
-    dummy_candidates = [
-        {"content": "Chính sách trả hàng và hoàn tiền Shopee trong 15 ngày", "score": 0.8, "metadata": {}},
-        {"content": "Các phương thức thanh toán hỗ trợ trên Shopee Vietnam", "score": 0.6, "metadata": {}},
-        {"content": "Quy định đăng bán sản phẩm dành cho người bán", "score": 0.5, "metadata": {}},
-    ]
-    results = rerank("chính sách trả hàng shopee", dummy_candidates, top_k=2)
+    query = "quy định trả hàng hoàn tiền shopee"
+    print(f"=== THỬ NGHIỆM RERANKING TRÊN DỮ LIỆU THẬT DỰ ÁN CHO QUERY: '{query}' ===\n")
+
+    # 1. Lấy dữ liệu Lexical (BM25) trước - cực nhanh, không bị treo
+    lexical_results = []
+    try:
+        from src.task6_lexical_search import lexical_search
+        lexical_results = lexical_search(query, top_k=5)
+        print(f"  ✓ Lexical BM25 Search: đã tìm thấy {len(lexical_results)} chunks")
+    except Exception as e:
+        print(f"  [Note] Lexical Search fallback: {e}")
+
+    # 2. Thử lấy dữ liệu Semantic Search (Task 5)
+    semantic_results = []
+    try:
+        from src.task5_semantic_search import semantic_search
+        semantic_results = semantic_search(query, top_k=5)
+        print(f"  ✓ Semantic Search: đã tìm thấy {len(semantic_results)} chunks")
+    except Exception as e:
+        print(f"  [Note] Semantic Search: {e}")
+
+    if semantic_results and lexical_results:
+        results = rerank(query, [semantic_results, lexical_results], top_k=5, method="rrf")
+        print("\n[RRF Rerank Result]:")
+    elif lexical_results:
+        # Sử dụng Qwen / Cross-Encoder Reranker trên kết quả thực tế từ BM25
+        results = rerank(query, lexical_results, top_k=5, method="qwen")
+        print("\n[Qwen / Cross-Encoder Rerank Result]:")
+    else:
+        dummy_candidates = [
+            {"content": "Chính sách trả hàng và hoàn tiền Shopee trong 15 ngày", "score": 0.8, "metadata": {"source": "returns-refund.md"}},
+            {"content": "Các phương thức thanh toán hỗ trợ trên Shopee Vietnam", "score": 0.6, "metadata": {"source": "payment-methods.md"}},
+        ]
+        results = rerank(query, dummy_candidates, top_k=2, method="qwen")
+        print("\n[Fallback Rerank Result]:")
+
     print(f"Reranked {len(results)} items:")
-    for r in results:
-        print(f"[{r['score']:.4f}] {r['content']}")
+    for i, r in enumerate(results, 1):
+        meta = r.get("metadata", {})
+        source = meta.get("source", r.get("source", "Unknown"))
+        print(f"[{i}] Score: {r['score']:.4f} | Nguồn: {source}")
+        print(f"    Nội dung:\n{r['content'][:200]}\n" + "-" * 60)
