@@ -37,8 +37,8 @@ TOP_P = 0.9
 # Chọn 0.3 vì: RAG cần factual, ít sáng tạo
 TEMPERATURE = 0.3
 
-# TODO: Chọn LLM model (OpenRouter model ID)
-LLM_MODEL = "openai/gpt-4o-mini"  # hoặc model ":free" nếu chưa có credit
+# Có thể override bằng OPENROUTER_MODEL trong .env khi cần dùng model khác.
+LLM_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
 
 # =============================================================================
@@ -186,6 +186,13 @@ def generate_with_citation(
             'retrieval_source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
+    if not isinstance(query, str) or not query.strip() or top_k <= 0:
+        return {
+            "answer": "Tôi không thể xác minh thông tin này từ nguồn hiện có.",
+            "sources": [],
+            "retrieval_source": "none",
+        }
+
     # Step 1: Retrieve chunks liên quan (Task 9 — hybrid + fallback PageIndex)
     chunks = retrieve(query, top_k=top_k)
 
@@ -210,15 +217,30 @@ def generate_with_citation(
         messages.extend(chat_history[-4:])
     messages.append({"role": "user", "content": user_message})
 
-    # Step 5: Gọi LLM (OpenRouter -> OpenAI -> Gemini, xem _get_llm_client)
-    client, model = _get_llm_client()
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-    )
-    answer = response.choices[0].message.content
+    # Step 5: Gọi LLM (OpenRouter -> OpenAI -> Gemini, xem _get_llm_client).
+    # Nếu provider tạm lỗi/thiếu key, vẫn trả về câu an toàn có nguồn thay vì crash UI.
+    try:
+        client, model = _get_llm_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        if not answer:
+            raise RuntimeError("LLM returned an empty response")
+    except Exception as exc:
+        source_names = []
+        for chunk in chunks:
+            source = (chunk.get("metadata", {}) or {}).get("source")
+            if source and source not in source_names:
+                source_names.append(source)
+        citations = " ".join(f"[{source}]" for source in source_names[:3])
+        answer = "Tôi không thể xác minh thông tin này từ nguồn hiện có."
+        if citations:
+            answer += f" Các tài liệu liên quan đã truy xuất: {citations}"
+        print(f"  [Note] Generation fallback: {exc}")
 
     # Step 6: Return
     return {

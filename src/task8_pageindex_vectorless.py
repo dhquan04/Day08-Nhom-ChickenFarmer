@@ -8,6 +8,7 @@ structural understanding của document thay vì embedding.
 import os
 import sys
 import json
+import time
 from pathlib import Path
 from typing import List, Dict, Any
 from dotenv import load_dotenv
@@ -20,6 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 PAGEINDEX_API_KEY = os.getenv("PAGEINDEX_API_KEY", "")
 STANDARDIZED_DIR = Path(__file__).parent.parent / "data" / "standardized"
+LEGAL_PDF_DIR = Path(__file__).parent.parent / "data" / "landing" / "legal"
 
 # Fallback fallback documents with structural metadata for vectorless fallback search
 PAGEINDEX_FALLBACK_DOCS = [
@@ -45,6 +47,41 @@ PAGEINDEX_FALLBACK_DOCS = [
 
 
 CACHE_FILE = Path(__file__).parent.parent / "data" / "pageindex_cache.json"
+POLL_INTERVAL_SECONDS = 2
+MAX_RETRIEVAL_POLLS = 20
+
+
+def _load_document_cache() -> Dict[str, str]:
+    """Load mapping PDF path -> PageIndex doc_id from the local cache."""
+    if not CACHE_FILE.exists():
+        return {}
+    try:
+        cached = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(cached, dict):
+            return {str(path): str(doc_id) for path, doc_id in cached.items()}
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  [Note] Cannot read PageIndex cache: {exc}")
+    return {}
+
+
+def _save_document_cache(cache: Dict[str, str]) -> None:
+    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_FILE.write_text(
+        json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _iter_relevant_items(value: Any):
+    """Yield relevant-content objects from old and new PageIndex response shapes."""
+    if isinstance(value, dict):
+        if value.get("relevant_content"):
+            yield value
+        else:
+            for child in value.values():
+                yield from _iter_relevant_items(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_relevant_items(child)
 
 
 def upload_documents() -> List[str]:
@@ -57,41 +94,39 @@ def upload_documents() -> List[str]:
         print("⚠ Chưa cấu hình PAGEINDEX_API_KEY hợp lệ trong file .env. Bỏ qua bước upload.")
         return []
 
-    # Đọc cache nếu có
-    if CACHE_FILE.exists():
-        try:
-            cached_data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-            if isinstance(cached_data, list) and len(cached_data) > 0:
-                return cached_data
-        except Exception:
-            pass
+    # PageIndexClient.submit_document chỉ nhận PDF. Dùng PDF gốc thay vì Markdown.
+    pdf_files = sorted(LEGAL_PDF_DIR.rglob("*.pdf")) if LEGAL_PDF_DIR.exists() else []
+    if not pdf_files:
+        print(f"⚠ Không tìm thấy PDF để upload tại {LEGAL_PDF_DIR}.")
+        return []
 
+    cached_doc_ids = _load_document_cache()
     uploaded_ids = []
     try:
         from pageindex.client import PageIndexClient
         client = PageIndexClient(api_key=PAGEINDEX_API_KEY)
 
-        md_files = list(STANDARDIZED_DIR.rglob("*.md"))
-        for md_file in md_files:
+        for pdf_file in pdf_files:
+            cache_key = str(pdf_file.resolve())
+            if cache_key in cached_doc_ids:
+                uploaded_ids.append(cached_doc_ids[cache_key])
+                continue
             try:
-                resp = client.submit_document(str(md_file))
+                resp = client.submit_document(str(pdf_file))
                 doc_id = resp.get("doc_id") or resp.get("id")
                 if doc_id:
                     uploaded_ids.append(doc_id)
-                    print(f"  ✓ Uploaded: {md_file.name} -> {doc_id}")
+                    cached_doc_ids[cache_key] = doc_id
+                    print(f"  ✓ Uploaded: {pdf_file.name} -> {doc_id}")
             except Exception as err:
                 err_msg = str(err)
                 if "Invalid API key" in err_msg or "unauthorized" in err_msg.lower():
                     print("⚠ PAGEINDEX_API_KEY trong .env không hợp lệ. Tự động chuyển sang Local Vectorless Search.")
                     break
-                print(f"  [Note] Upload {md_file.name} fallback: {err}")
+                print(f"  [Note] Upload {pdf_file.name} fallback: {err}")
 
-        if uploaded_ids:
-            try:
-                CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                CACHE_FILE.write_text(json.dumps(uploaded_ids, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+        if cached_doc_ids:
+            _save_document_cache(cached_doc_ids)
     except Exception as e:
         print(f"Lỗi kết nối PageIndex SDK: {e}")
 
@@ -133,30 +168,43 @@ def pageindex_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
                         retrieval_id = resp.get("retrieval_id") or resp.get("id")
 
                         if retrieval_id:
-                            retrieval = client.get_retrieval(retrieval_id)
+                            retrieval = {}
+                            for _ in range(MAX_RETRIEVAL_POLLS):
+                                retrieval = client.get_retrieval(retrieval_id)
+                                status = str(retrieval.get("status", "")).lower()
+                                if status == "completed":
+                                    break
+                                if status in {"failed", "error", "cancelled"}:
+                                    print(f"  [Note] PageIndex retrieval {retrieval_id}: {status}")
+                                    retrieval = {}
+                                    break
+                                time.sleep(POLL_INTERVAL_SECONDS)
+                            else:
+                                print(f"  [Note] PageIndex retrieval timed out: {retrieval_id}")
+                                retrieval = {}
+
                             retrieved_nodes = retrieval.get("retrieved_nodes") or []
                             for node in retrieved_nodes:
                                 node_title = node.get("title", "")
-                                for group in node.get("relevant_contents", []):
-                                    for item in group:
-                                        content = item.get("relevant_content", "")
-                                        if content:
-                                            results.append({
-                                                "content": content,
-                                                "score": round(1.0 / (rank + 1), 4),
-                                                "metadata": {
-                                                    "section": item.get("section_title") or node_title or "General",
-                                                    "doc_id": doc_id
-                                                },
-                                                "source": "pageindex"
-                                            })
-                                            rank += 1
+                                for item in _iter_relevant_items(node.get("relevant_contents", [])):
+                                    content = item.get("relevant_content", "")
+                                    if content:
+                                        results.append({
+                                            "content": content,
+                                            "score": round(1.0 / (rank + 1), 4),
+                                            "metadata": {
+                                                "section": item.get("section_title") or node_title or "General",
+                                                "doc_id": doc_id
+                                            },
+                                            "source": "pageindex"
+                                        })
+                                        rank += 1
                         
                         # Ngắt sớm nếu đã tìm đủ số lượng kết quả liên quan
                         if len(results) >= top_k:
                             break
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(f"  [Note] PageIndex query for {doc_id} failed: {exc}")
 
                 if results:
                     results.sort(key=lambda x: x["score"], reverse=True)

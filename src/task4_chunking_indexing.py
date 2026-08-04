@@ -27,8 +27,9 @@ CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 CHUNKING_METHOD = "recursive"
 
-EMBEDDING_MODEL = "BAAI/bge-m3"
-EMBEDDING_DIM = 1024
+# Model này đã có sẵn local, đủ nhẹ cho môi trường lab và không cần tải lại khi chạy.
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_DIM = 384
 
 VECTOR_STORE = "chromadb"
 COLLECTION_NAME = "ecommerce_support_docs"

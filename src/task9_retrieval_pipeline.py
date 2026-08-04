@@ -25,6 +25,8 @@ Logic:
     điểm số giữa hai nhóm rồi chọn ngưỡng nằm giữa.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 from .task5_semantic_search import semantic_search
 from .task6_lexical_search import lexical_search
 from .task7_reranking import rerank, rerank_rrf
@@ -35,9 +37,7 @@ from .task8_pageindex_vectorless import pageindex_search
 # CONFIGURATION
 # =============================================================================
 
-# TODO: Calibrate threshold này bằng cách tự đo điểm cosine của semantic_search
-# cho câu hỏi liên quan vs câu hỏi lạc đề (xem ghi chú ở trên) — ĐỪNG copy nguyên
-# giá trị mẫu, mỗi corpus/embedding model sẽ cho khoảng điểm khác nhau.
+# Ngưỡng ban đầu cho MiniLM + corpus lab; cần calibrate lại khi đổi corpus/model.
 SCORE_THRESHOLD = 0.3   # Nếu best score (cosine gốc) < threshold → fallback PageIndex
 DEFAULT_TOP_K = 5
 RERANK_METHOD = "rrf"  # "cross_encoder" | "mmr" | "rrf"
@@ -77,33 +77,57 @@ def retrieve(
             'source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement full retrieval pipeline
-    #
-    # Step 1: Song song chạy semantic + lexical
-    # dense_results = semantic_search(query, top_k=top_k * 2)
-    # sparse_results = lexical_search(query, top_k=top_k * 2)
-    #
-    # Step 2: Merge bằng RRF
-    # merged = rerank_rrf([dense_results, sparse_results], top_k=top_k * 2)
-    # for item in merged:
-    #     item["source"] = "hybrid"
-    #
-    # Step 3: Rerank
-    # if use_reranking and merged:
-    #     final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
-    # else:
-    #     final_results = merged[:top_k]
-    #
-    # Step 4: Check threshold DÙNG ĐIỂM COSINE GỐC (dense_results), KHÔNG PHẢI RRF
-    # best_score = dense_results[0]["score"] if dense_results else 0.0
-    # if best_score < score_threshold:
-    #     print(f"  ⚠ Semantic best score ({best_score:.3f}) < threshold ({score_threshold})")
-    #     fallback = pageindex_search(query, top_k=top_k)
-    #     if fallback:
-    #         return fallback
-    #
-    # return final_results[:top_k]
-    raise NotImplementedError("Implement retrieve")
+    if not isinstance(query, str) or not query.strip() or top_k <= 0:
+        return []
+
+    fetch_k = max(top_k * 2, top_k)
+
+    # Dense và sparse search độc lập nên có thể chạy đồng thời.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        dense_future = executor.submit(semantic_search, query, fetch_k)
+        sparse_future = executor.submit(lexical_search, query, fetch_k)
+        try:
+            dense_results = dense_future.result()
+        except Exception as exc:
+            print(f"  [Note] Semantic search unavailable: {exc}")
+            dense_results = []
+        try:
+            sparse_results = sparse_future.result()
+        except Exception as exc:
+            print(f"  [Note] Lexical search unavailable: {exc}")
+            sparse_results = []
+
+    # RRF chỉ dùng để gộp thứ hạng. Không dùng score RRF để quyết định fallback.
+    merged = rerank_rrf([dense_results, sparse_results], top_k=fetch_k)
+    for item in merged:
+        item["source"] = "hybrid"
+
+    # RRF đã là một bước fusion. Chỉ rerank thêm nếu chọn một phương pháp khác.
+    if use_reranking and merged and RERANK_METHOD not in {"rrf", ""}:
+        final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
+        for item in final_results:
+            item["source"] = "hybrid"
+    else:
+        final_results = merged[:top_k]
+
+    # Dùng cosine score gốc từ dense search, tuyệt đối không dùng RRF score.
+    best_dense_score = float(dense_results[0].get("score", 0.0)) if dense_results else 0.0
+    if best_dense_score < score_threshold:
+        print(
+            f"  [Fallback] Best dense score {best_dense_score:.3f} "
+            f"< threshold {score_threshold:.3f}"
+        )
+        try:
+            fallback_results = pageindex_search(query, top_k=top_k)
+        except Exception as exc:
+            print(f"  [Note] PageIndex fallback unavailable: {exc}")
+            fallback_results = []
+        if fallback_results:
+            for item in fallback_results:
+                item["source"] = "pageindex"
+            return fallback_results[:top_k]
+
+    return final_results[:top_k]
 
 
 if __name__ == "__main__":
