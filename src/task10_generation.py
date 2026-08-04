@@ -50,7 +50,8 @@ khách hàng (thanh toán, đổi trả, giao hàng, quyền riêng tư, quy đ�
 
 Quy tắc bắt buộc:
 1. Chỉ sử dụng thông tin từ context được cung cấp — KHÔNG bịa đặt
-2. Mỗi khẳng định phải có trích dẫn ngay sau, ví dụ: [Returns Policy, 2026]
+2. Mỗi khẳng định phải có trích dẫn ngay sau, dùng đúng tên nguồn ghi trong context,
+   ví dụ: [returns-refund-policy-shopee.pdf]. KHÔNG tự thêm năm hay thông tin không có trong context.
 3. Nếu context không đủ thông tin → trả lời: "Tôi không thể xác minh thông tin này từ nguồn hiện có"
 4. Trả lời bằng tiếng Việt, có cấu trúc rõ ràng theo đoạn văn
 5. Không suy luận hay mở rộng ngoài những gì được nêu trong context"""
@@ -77,15 +78,12 @@ def reorder_for_llm(chunks: list[dict]) -> list[dict]:
     Returns:
         List reordered để maximize LLM attention.
     """
-    # TODO: Implement reordering
-    #
-    # if len(chunks) <= 2:
-    #     return chunks
-    #
-    # front = chunks[::2]   # index 0, 2, 4 -> đặt ở đầu
-    # back = chunks[1::2]   # index 1, 3    -> đặt ở cuối (reversed)
-    # return front + back[::-1]
-    raise NotImplementedError("Implement reorder_for_llm")
+    if len(chunks) <= 2:
+        return chunks
+
+    front = chunks[::2]   # index 0, 2, 4, ... -> giữ ở đầu (giữ nguyên thứ tự)
+    back = chunks[1::2]   # index 1, 3, ...     -> đặt ở cuối, đảo ngược
+    return front + back[::-1]
 
 
 # =============================================================================
@@ -103,25 +101,65 @@ def format_context(chunks: list[dict]) -> str:
     Returns:
         Formatted context string.
     """
-    # TODO: Implement context formatting
-    #
-    # context_parts = []
-    # for i, chunk in enumerate(chunks, 1):
-    #     source = chunk.get("metadata", {}).get("source", f"Source {i}")
-    #     doc_type = chunk.get("metadata", {}).get("type", "unknown")
-    #     context_parts.append(
-    #         f"[Document {i} | Source: {source} | Type: {doc_type}]\n"
-    #         f"{chunk['content']}\n"
-    #     )
-    # return "\n---\n".join(context_parts)
-    raise NotImplementedError("Implement format_context")
+    context_parts = []
+    for i, chunk in enumerate(chunks, 1):
+        meta = chunk.get("metadata", {}) or {}
+        source = meta.get("source", f"Source {i}")
+        doc_type = meta.get("type", "unknown")
+        context_parts.append(
+            f"[Document {i} | Source: {source} | Type: {doc_type}]\n"
+            f"{chunk.get('content', '')}\n"
+        )
+    return "\n---\n".join(context_parts)
+
+
+# =============================================================================
+# LLM CLIENT (OpenRouter -> OpenAI -> Gemini fallback)
+# =============================================================================
+
+def _get_llm_client():
+    """
+    Chọn provider theo API key có sẵn trong .env, theo thứ tự ưu tiên:
+    OpenRouter (nhiều model :free) -> OpenAI -> Gemini (OpenAI-compatible endpoint).
+
+    Returns:
+        (client, model_id) — client là instance openai.OpenAI đã trỏ base_url phù hợp.
+    """
+    from openai import OpenAI
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY")
+
+    if openrouter_key:
+        return (
+            OpenAI(api_key=openrouter_key, base_url="https://openrouter.ai/api/v1"),
+            LLM_MODEL,
+        )
+    if openai_key:
+        return OpenAI(api_key=openai_key), "gpt-4o-mini"
+    if gemini_key:
+        return (
+            OpenAI(
+                api_key=gemini_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            ),
+            "gemini-1.5-flash",
+        )
+
+    raise RuntimeError(
+        "Không tìm thấy API key nào. Hãy đặt OPENROUTER_API_KEY (khuyên dùng), "
+        "OPENAI_API_KEY hoặc GEMINI_API_KEY trong file .env"
+    )
 
 
 # =============================================================================
 # GENERATION
 # =============================================================================
 
-def generate_with_citation(query: str, top_k: int = TOP_K) -> dict:
+def generate_with_citation(
+    query: str, top_k: int = TOP_K, chat_history: list[dict] | None = None
+) -> dict:
     """
     End-to-end RAG generation có citation.
 
@@ -129,12 +167,17 @@ def generate_with_citation(query: str, top_k: int = TOP_K) -> dict:
         1. Retrieve relevant chunks
         2. Reorder để tránh lost in the middle
         3. Format context với source labels
-        4. Build prompt (system + context + query)
+        4. Build prompt (system + lịch sử hội thoại + context + query)
         5. Call LLM
         6. Return answer + sources
 
     Args:
         query: Câu hỏi của user
+        top_k: Số chunks lấy về từ retrieval
+        chat_history: (Bonus — conversation memory) Danh sách các lượt hội thoại
+            trước đó, dạng [{"role": "user"/"assistant", "content": str}, ...].
+            Chỉ 4 lượt gần nhất được đưa vào prompt để tránh phình context
+            và giảm nhiễu do "lost in the middle".
 
     Returns:
         {
@@ -143,44 +186,46 @@ def generate_with_citation(query: str, top_k: int = TOP_K) -> dict:
             'retrieval_source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement generation pipeline
-    #
-    # # Step 1: Retrieve
-    # chunks = retrieve(query, top_k=top_k)
-    #
-    # # Step 2: Reorder
-    # reordered = reorder_for_llm(chunks)
-    #
-    # # Step 3: Format context
-    # context = format_context(reordered)
-    #
-    # # Step 4: Build prompt
-    # user_message = f"""Context:\n{context}\n\n---\n\nQuestion: {query}"""
-    #
-    # # Step 5: Call LLM (OpenRouter — OpenAI-compatible API)
-    # from openai import OpenAI
-    # api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-    # client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-    #
-    # response = client.chat.completions.create(
-    #     model=LLM_MODEL,
-    #     messages=[
-    #         {"role": "system", "content": SYSTEM_PROMPT},
-    #         {"role": "user", "content": user_message}
-    #     ],
-    #     temperature=TEMPERATURE,
-    #     top_p=TOP_P,
-    # )
-    #
-    # answer = response.choices[0].message.content
-    #
-    # # Step 6: Return
-    # return {
-    #     "answer": answer,
-    #     "sources": chunks,
-    #     "retrieval_source": chunks[0].get("source", "hybrid") if chunks else "none"
-    # }
-    raise NotImplementedError("Implement generate_with_citation")
+    # Step 1: Retrieve chunks liên quan (Task 9 — hybrid + fallback PageIndex)
+    chunks = retrieve(query, top_k=top_k)
+
+    # Không có evidence nào -> không gọi LLM, trả lời an toàn ngay
+    if not chunks:
+        return {
+            "answer": "Tôi không thể xác minh thông tin này từ nguồn hiện có.",
+            "sources": [],
+            "retrieval_source": "none",
+        }
+
+    # Step 2: Reorder để tránh "lost in the middle"
+    reordered = reorder_for_llm(chunks)
+
+    # Step 3: Format context kèm source để LLM cite
+    context = format_context(reordered)
+
+    # Step 4: Build prompt — chèn tối đa 4 lượt hội thoại gần nhất (bonus memory)
+    user_message = f"Context:\n{context}\n\n---\n\nQuestion: {query}"
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if chat_history:
+        messages.extend(chat_history[-4:])
+    messages.append({"role": "user", "content": user_message})
+
+    # Step 5: Gọi LLM (OpenRouter -> OpenAI -> Gemini, xem _get_llm_client)
+    client, model = _get_llm_client()
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+    )
+    answer = response.choices[0].message.content
+
+    # Step 6: Return
+    return {
+        "answer": answer,
+        "sources": chunks,
+        "retrieval_source": chunks[0].get("source", "hybrid") if chunks else "none",
+    }
 
 
 if __name__ == "__main__":
