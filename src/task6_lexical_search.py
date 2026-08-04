@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import List, Dict, Any
 import numpy as np
 from rank_bm25 import BM25Okapi
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Tắt cảnh báo dọn dẹp bộ nhớ của multiprocess trên Python 3.12 khi thoát chương trình
 try:
@@ -143,6 +145,7 @@ def load_corpus() -> List[Dict[str, Any]]:
 
 CORPUS: List[Dict[str, Any]] = load_corpus()
 _BM25_INDEX = None
+_TFIDF_INDEX = None
 
 
 import re
@@ -173,13 +176,24 @@ def build_bm25_index(corpus: List[Dict[str, Any]]) -> BM25Okapi:
     return bm25
 
 
-def lexical_search(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+def build_tfidf_index(corpus: List[Dict[str, Any]]):
+    """Xây dựng TF-IDF index để so sánh với BM25 (bonus Task 6)."""
+    texts = [get_searchable_text(doc) for doc in corpus]
+    vectorizer = TfidfVectorizer(lowercase=True, token_pattern=r"(?u)\b\w+\b")
+    matrix = vectorizer.fit_transform(texts)
+    return vectorizer, matrix
+
+
+def lexical_search(
+    query: str, top_k: int = 10, method: str = "bm25"
+) -> List[Dict[str, Any]]:
     """
     Tìm kiếm từ khóa sử dụng BM25.
 
     Args:
         query: Câu truy vấn
         top_k: Số lượng kết quả tối đa
+        method: "bm25" (mặc định) hoặc "tfidf" (bonus để so sánh).
 
     Returns:
         List of {
@@ -189,19 +203,28 @@ def lexical_search(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         }
         Sorted by score descending.
     """
-    global CORPUS, _BM25_INDEX
+    global CORPUS, _BM25_INDEX, _TFIDF_INDEX
 
     if not CORPUS:
         CORPUS = load_corpus()
 
-    if _BM25_INDEX is None:
-        _BM25_INDEX = build_bm25_index(CORPUS)
-
-    tokenized_query = tokenize(query)
-    if not tokenized_query:
+    if not isinstance(query, str) or not query.strip() or top_k <= 0:
         return []
 
-    scores = _BM25_INDEX.get_scores(tokenized_query)
+    method = method.lower()
+    if method == "bm25":
+        if _BM25_INDEX is None:
+            _BM25_INDEX = build_bm25_index(CORPUS)
+        scores = _BM25_INDEX.get_scores(tokenize(query))
+    elif method == "tfidf":
+        if _TFIDF_INDEX is None:
+            _TFIDF_INDEX = build_tfidf_index(CORPUS)
+        vectorizer, matrix = _TFIDF_INDEX
+        query_vector = vectorizer.transform([query])
+        scores = cosine_similarity(query_vector, matrix).flatten()
+    else:
+        raise ValueError("method phải là 'bm25' hoặc 'tfidf'")
+
     top_indices = np.argsort(scores)[::-1][:top_k]
 
     results = []
@@ -219,17 +242,10 @@ def lexical_search(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     query = "phương thức thanh toán shopee"
-    results = lexical_search(query, top_k=5)
-    print(f"=== KẾT QUẢ TÌM KIẾM BM25 CHO QUERY: '{query}' ({len(results)} chunks) ===\n")
-    for i, r in enumerate(results, 1):
-        meta = r.get("metadata", {})
-        source = meta.get("source", "Unknown")
-        score = r.get("score", 0.0)
-        content = r.get("content", "")
-        print(f"[{i}] Score: {score:.4f} | Nguồn: {source}")
-        if meta.get("title"):
-            print(f"    Tiêu đề: {meta['title']}")
-        if meta.get("url"):
-            print(f"    URL: {meta['url']}")
-        print(f"    Nội dung:\n{content}\n" + "-" * 70)
+    for method in ("bm25", "tfidf"):
+        results = lexical_search(query, top_k=3, method=method)
+        print(f"=== {method.upper()} | '{query}' ===")
+        for i, r in enumerate(results, 1):
+            source = r.get("metadata", {}).get("source", "Unknown")
+            print(f"[{i}] {r['score']:.4f} | {source}")
 

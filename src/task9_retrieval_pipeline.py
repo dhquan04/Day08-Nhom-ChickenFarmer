@@ -5,7 +5,7 @@ Kết hợp semantic search + lexical search + reranking + PageIndex fallback
 thành một pipeline thống nhất.
 
 Logic:
-    1. Chạy semantic_search + lexical_search song song
+    1. Chạy semantic_search + TF-IDF lexical_search song song
     2. Merge kết quả (RRF hoặc weighted fusion)
     3. Rerank
     4. Nếu top result score < threshold → fallback sang PageIndex
@@ -41,6 +41,7 @@ from .task8_pageindex_vectorless import pageindex_search
 SCORE_THRESHOLD = 0.3   # Nếu best score (cosine gốc) < threshold → fallback PageIndex
 DEFAULT_TOP_K = 5
 RERANK_METHOD = "rrf"  # "cross_encoder" | "mmr" | "rrf"
+LEXICAL_METHOD = "tfidf"  # "bm25" | "tfidf" — dùng TF-IDF cho hybrid retrieval
 
 
 def retrieve(
@@ -85,7 +86,9 @@ def retrieve(
     # Dense và sparse search độc lập nên có thể chạy đồng thời.
     with ThreadPoolExecutor(max_workers=2) as executor:
         dense_future = executor.submit(semantic_search, query, fetch_k)
-        sparse_future = executor.submit(lexical_search, query, fetch_k)
+        sparse_future = executor.submit(
+            lexical_search, query, fetch_k, method=LEXICAL_METHOD
+        )
         try:
             dense_results = dense_future.result()
         except Exception as exc:

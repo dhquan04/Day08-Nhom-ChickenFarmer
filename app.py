@@ -115,7 +115,7 @@ with st.sidebar:
     st.divider()
     st.caption("**Kiến trúc hệ thống:**")
     st.caption(
-        "Hybrid Retrieval (Semantic + BM25) → RRF Rerank → PageIndex Fallback → LLM Generation có Citation"
+        "Hybrid Retrieval (Semantic + TF-IDF) → RRF Rerank → PageIndex Fallback → LLM Generation có Citation"
     )
 
 # =============================================================================
