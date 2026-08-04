@@ -1,5 +1,5 @@
 """
-Task 6 — Lexical Search Module (BM25).
+Task 6 — Lexical Search Module (TF-IDF mặc định, có hỗ trợ BM25 để so sánh).
 
 Mặc định sử dụng BM25 (rank-bm25).
 BM25 hoạt động thế nào:
@@ -185,7 +185,7 @@ def build_tfidf_index(corpus: List[Dict[str, Any]]):
 
 
 def lexical_search(
-    query: str, top_k: int = 10, method: str = "bm25"
+    query: str, top_k: int = 10, method: str = "tfidf"
 ) -> List[Dict[str, Any]]:
     """
     Tìm kiếm từ khóa sử dụng BM25.
@@ -193,7 +193,7 @@ def lexical_search(
     Args:
         query: Câu truy vấn
         top_k: Số lượng kết quả tối đa
-        method: "bm25" (mặc định) hoặc "tfidf" (bonus để so sánh).
+        method: "tfidf" (mặc định) hoặc "bm25" để so sánh.
 
     Returns:
         List of {
