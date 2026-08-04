@@ -27,11 +27,24 @@ CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 CHUNKING_METHOD = "recursive"
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
+EMBEDDING_MODEL = "BAAI/bge-m3"
+EMBEDDING_DIM = 1024
 
 VECTOR_STORE = "chromadb"
 COLLECTION_NAME = "ecommerce_support_docs"
+
+# Mapping customer_role cho từng tài liệu (buyer / seller / both)
+CUSTOMER_ROLE_MAP = {
+    "returns-refund-policy-shopee.md": "buyer",
+    "payment-methods-shopee.md": "both",
+    "privacy-policy-shopee.md": "both",
+    "seller-listing-regulations-shopee.md": "seller",
+    "article_01.md": "buyer",
+    "article_02.md": "buyer",
+    "article_03.md": "buyer",
+    "article_04.md": "buyer",
+    "article_05.md": "buyer",
+}
 
 _MODEL_INSTANCE: Optional[SentenceTransformer] = None
 
@@ -60,7 +73,7 @@ def load_documents() -> list[dict]:
     Đọc toàn bộ markdown files từ data/standardized/.
 
     Returns:
-        List of {'content': str, 'metadata': {'source': str, 'type': str}}
+        List of {'content': str, 'metadata': {'source': str, 'type': str, 'customer_role': str}}
     """
     documents = []
     if not STANDARDIZED_DIR.exists():
@@ -72,11 +85,13 @@ def load_documents() -> list[dict]:
         if not content:
             continue
         doc_type = "legal" if "legal" in str(md_file.parent) else "news"
+        customer_role = CUSTOMER_ROLE_MAP.get(md_file.name, "both")
         documents.append({
             "content": content,
             "metadata": {
                 "source": md_file.name,
-                "type": doc_type
+                "type": doc_type,
+                "customer_role": customer_role
             }
         })
     return documents
